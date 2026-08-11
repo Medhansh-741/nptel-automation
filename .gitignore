@@ -1,0 +1,25 @@
+# Local environment config (device-specific paths)
+.env
+
+# Session / credentials — NEVER commit
+state.json
+
+# Personal data store (per-user submission history)
+db/answers.db
+db/answers.db-*
+
+# Browser automation runtime noise
+.playwright-mcp/
+
+# Screenshots / captured images
+*.png
+*.jpg
+*.jpeg
+
+# Python
+__pycache__/
+*.pyc
+
+# Misc
+run.log
+Thumbs.db
