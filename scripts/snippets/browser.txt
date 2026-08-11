@@ -1,0 +1,150 @@
+# ============================================================================
+# Browser automation snippets (Playwright MCP / playwright_browser_run_code_unsafe)
+# These are the exact proven patterns used on the NPTEL course portal.
+# Copy the relevant block into the `code` parameter of run_code_unsafe.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 0. VM-ESCAPE HEADER (REQUIRED in every run_code_unsafe call that touches fs)
+# ----------------------------------------------------------------------------
+# The run_code_unsafe sandbox strips Node globals (require/process/Buffer/import).
+# Escape via the Function constructor to reach the real Node process:
+#   const nodeProcess = globalThis.constructor.constructor('return process')()
+#                     .mainModule.require;
+#   const fs   = nodeProcess('fs');
+#   const path = nodeProcess('path');
+#   const Buffer = nodeProcess('buffer').Buffer;
+#
+# Without this you WILL hit: "ReferenceError: require is not defined" /
+# "process is not defined" / "Buffer is not defined". This is expected; use the escape.
+
+# ----------------------------------------------------------------------------
+# 1. EXTRACT QUIZ QUESTION IMAGES (save each question's PNG to disk)
+# ----------------------------------------------------------------------------
+# One question per <section class="bg-white">. The <img> carries the full
+# question text + all options INSIDE the image (DOM shows only bare a.-d.
+# placeholders). Returns the saved file list.
+#
+# async (page) => {
+#   const nodeProcess = globalThis.constructor.constructor('return process')().mainModule.require;
+#   const fs = nodeProcess('fs');
+#   const path = nodeProcess('path');
+#   const Buffer = nodeProcess('buffer').Buffer;
+#   const outDir = '<ABSOLUTE_TMP_DIR>';   // e.g. C:/Users/you/AppData/Local/Temp/opencode/w05quiz
+#   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+#   const data = await page.evaluate(() => {
+#     const sections = Array.from(document.querySelectorAll('section.bg-white'));
+#     return sections.map((sec, si) => {
+#       const img = Array.from(sec.querySelectorAll('img')).find(i => i.src.startsWith('data:image'));
+#       const radios = Array.from(sec.querySelectorAll('input[type=radio]'));
+#       return { q: si + 1, b64: img ? img.src.split(',')[1] : null, optCount: radios.length };
+#     });
+#   });
+#   const files = [];
+#   for (const item of data) {
+#     if (item.b64) {
+#       const p = path.join(outDir, `q${item.q}.png`);
+#       fs.writeFileSync(p, Buffer.from(item.b64, 'base64'));
+#       files.push(p);
+#     }
+#   }
+#   return { saved: files, totalQuestions: data.length };
+# }
+
+# ----------------------------------------------------------------------------
+# 2. INJECT CODE INTO ACE EDITOR (programming assignments)
+# ----------------------------------------------------------------------------
+# Each PA has up to THREE ace editors: 'prefix-editor', 'code-editor', 'suffix-editor'.
+# fireEvent DOES NOT EXIST — use _emit('input', {}) + a bubbled input event.
+#
+# async (page) => {
+#   const code = `<YOUR_JAVA_CODE>`;                 // target editor body
+#   const result = await page.evaluate((code) => {
+#     const editor = window.ace.edit('code-editor');  // or prefix-editor / suffix-editor
+#     editor.getSession().setValue(code);
+#     editor._emit('input', {});
+#     editor.textInput.getElement().dispatchEvent(new Event('input', { bubbles: true }));
+#     return { ok: true, value: editor.getSession().getValue().length };
+#   }, code);
+#   return result;
+# }
+
+# ----------------------------------------------------------------------------
+# 3. FILL QUIZ RADIOS BY ANSWER LETTER (a:0, b:1, c:2, d:3)
+# ----------------------------------------------------------------------------
+# IMPORTANT (learned the hard way): the radios are React-controlled. A plain
+# DOM `.click()` + dispatch on the hidden <input> is UNRELIABLE — some questions
+# silently won't register (observed: 9 of 10 worked, 1 stayed blank). After the
+# evaluate-based fill, VERIFY every radio is checked; for any that stayed blank,
+# click the LABEL with a real mouse click:
+#   await page.getByRole('radio', { name: '<letter>.' }).nth(<qIndex>).click({ force: true })
+#   (or page.locator('section').filter({ hasText: '<qn>.' }).getByLabel('<letter>.').click())
+#
+# First pass (evaluate-based fill — do this for all 10, then fix stragglers):
+# async (page) => {
+#   const answers = { 1:'a', 2:'b', 3:'c', 4:'d' };   // qnumber -> letter
+#   const letterIdx = { a:0, b:1, c:2, d:3 };
+#   const result = await page.evaluate((answers) => {
+#     const letterIdx = { a:0, b:1, c:2, d:3 };
+#     const sections = Array.from(document.querySelectorAll('section.bg-white'));
+#     const out = [];
+#     sections.forEach((sec, si) => {
+#       const qn = si + 1;
+#       const ans = answers[qn];
+#       if (!ans) { out.push({ q: qn, err: 'no answer' }); return; }
+#       const radios = Array.from(sec.querySelectorAll('input[type=radio]'));
+#       const target = radios[letterIdx[ans]];
+#       if (!target) { out.push({ q: qn, err: 'no radio idx' }); return; }
+#       if (!target.checked) {
+#         target.click();
+#         target.dispatchEvent(new Event('change', { bubbles: true }));
+#         target.dispatchEvent(new Event('input', { bubbles: true }));
+#       }
+#       out.push({ q: qn, chosen: ans, idx: letterIdx[ans], checked: target.checked });
+#     });
+#     return out;
+#   }, answers);
+#   await page.waitForTimeout(500);
+#   return result;
+# }
+
+# ----------------------------------------------------------------------------
+# 4. READ ASSIGNMENT PROBLEM / EDITOR CONTENT (inspection)
+# ----------------------------------------------------------------------------
+# async (page) => {
+#   const info = await page.evaluate(() => {
+#     const editors = {};
+#     ['prefix-editor','code-editor','suffix-editor'].forEach((id) => {
+#       const e = window.ace && window.ace.edit(id);
+#       editors[id] = e ? e.getSession().getValue() : null;
+#     });
+#     return {
+#       url: location.href,
+#       editors,
+#       problemText: (document.querySelector('.problem-statement,.question-content') || {}).innerText || '',
+#     };
+#   });
+#   return info;
+# }
+
+# ----------------------------------------------------------------------------
+# 5. WINDOW/URL ID DISCOVERY (progassignmentId / assessmentId / unitId)
+# ----------------------------------------------------------------------------
+# The course-outline items are BUTTONS (no anchors, no hrefs). Click the item,
+# then read location.href — the SPA updates the URL to that item's page:
+#   ?unitId=<u>&progassignmentId=<id>   (programming assignment)
+#   ?unitId=<u>&assessmentId=<id>       (quiz)
+# Step A — expand the target week and read the item refs from a snapshot, then
+#          click each outline button one at a time. After each click, the URL
+#          reveals the ID:
+#   await page.getByRole('button', { name: 'PA1' }).click();  // or the item's exact title
+#   const id = new URL(page.url()).searchParams.get('progassignmentId');
+# Step B — helper to read the current item ID(s) after clicking:
+# async (page) => {
+#   const u = new URL(page.url());
+#   return {
+#     unitId: u.searchParams.get('unitId'),
+#     progassignmentId: u.searchParams.get('progassignmentId'),
+#     assessmentId: u.searchParams.get('assessmentId'),
+#   };
+# }
