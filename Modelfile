@@ -1,0 +1,5 @@
+FROM glm-ocr
+PARAMETER num_ctx 16384
+PARAMETER temperature 0
+PARAMETER num_predict 8192
+SYSTEM "Text Recognition:"
